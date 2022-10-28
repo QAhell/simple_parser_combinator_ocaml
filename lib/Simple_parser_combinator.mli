@@ -8,6 +8,12 @@ sig
   (** an empty error message *)
   val default_error : t
 
+  (** returns true iff the error is the default error and not a real error *)
+  val is_default_error : t -> bool
+
+  (** returns true iff the error is a real error and not the default error *)
+  val is_real_error : t -> bool
+
   (** if two alternative parses fail, their errors have to be merged somehow *)
   val merge : t -> t -> t
 end
@@ -23,11 +29,11 @@ sig
 
   val execute :
     ('input, 'output) t ->
-    ('output -> 'input -> 'result) ->
+    ('output -> 'input -> Error_info.t option -> 'result) ->
     (Error_info.t -> 'result) ->
     'input -> 'result
 
-  val fail : ('input, 'output) t
+  val error : Error_info.t -> ('input, 'output) t
 
   val recurse :
     (('input, 'output) t -> ('input, 'output) t) ->
@@ -37,6 +43,11 @@ sig
     ('input, 'a) t ->
     ('input, 'b) t ->
     ('input, 'a * 'b) t
+
+  val expect :
+    string ->
+    ('input -> ('output * 'input, Error_info.t) Either.t) ->
+    ('input, 'output) t
 
   val convert :
     ('input, 'a) t ->
@@ -53,7 +64,7 @@ sig
     ('a -> ('input, 'b) t) ->
     ('input, 'b) t
 
-  val repeat_and_fold_left :
+  (*val repeat_and_fold_left :
     ('input, 'a) t ->
     'b ->
     ('b -> 'a -> 'b) ->
@@ -70,11 +81,6 @@ sig
   val optional :
     ('input, 'output) t ->
     ('input, 'output option) t
-
-  val expect :
-    string ->
-    ('input -> 'input * ('output, Error_info.t) Either.t) ->
-    ('input, 'output) t
 
   val name :
     string ->
@@ -113,7 +119,7 @@ sig
         val expect_spaces : (Input.t, string) t
 
         val optional_spaces_before : (Input.t, 'a) t -> (Input.t, 'a) t
-      end
+      end *)
 
 end
 

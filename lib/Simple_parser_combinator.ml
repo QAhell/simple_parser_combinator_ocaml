@@ -2,6 +2,8 @@ module type Error_info =
 sig
   type t
   val default_error : t
+  val is_default_error : t -> bool
+  val is_real_error : t -> bool
   val merge : t -> t -> t
 end
 
@@ -14,11 +16,11 @@ sig
 
   val execute :
     ('input, 'output) t ->
-    ('output -> 'input -> 'result) ->
+    ('output -> 'input -> Error_info.t option -> 'result) ->
     (Error_info.t -> 'result) ->
     'input -> 'result
 
-  val fail : ('input, 'output) t
+  val error : Error_info.t -> ('input, 'output) t
 
   val recurse :
     (('input, 'output) t -> ('input, 'output) t) ->
@@ -28,6 +30,11 @@ sig
     ('input, 'a) t ->
     ('input, 'b) t ->
     ('input, 'a * 'b) t
+
+  val expect :
+    string ->
+    ('input -> ('output * 'input, Error_info.t) Either.t) ->
+    ('input, 'output) t
 
   val convert :
     ('input, 'a) t ->
@@ -44,7 +51,7 @@ sig
     ('a -> ('input, 'b) t) ->
     ('input, 'b) t
 
-  val repeat_and_fold_left :
+  (*val repeat_and_fold_left :
     ('input, 'a) t ->
     'b ->
     ('b -> 'a -> 'b) ->
@@ -61,11 +68,6 @@ sig
   val optional :
     ('input, 'output) t ->
     ('input, 'output option) t
-
-  val expect :
-    string ->
-    ('input -> 'input * ('output, Error_info.t) Either.t) ->
-    ('input, 'output) t
 
   val name :
     string ->
@@ -105,6 +107,7 @@ sig
 
         val optional_spaces_before : (Input.t, 'a) t -> (Input.t, 'a) t
       end
+      *)
 
 end
 
@@ -123,11 +126,56 @@ struct
   module Trampoline = Trampoline
   module Error_info = Error_info
 
-  type ('input, 'output) t = { p : 'result. 'input ->
-          ('output option * 'input * Error_info.t -> 'result Tampoline.t) ->
-            'result Trampoline.t }
+  type ('input, 'output) t =
+    'input -> (('output * 'input) option * Error_info.t) Trampoline.t
 
-  let execute p on_success on_failure input =
-    p.p input 
+  let execute parsr on_success on_error toks =
+    match Trampoline.execute (parsr toks) with
+      | (Some (result, input), error) ->
+          on_success result input
+            (if Error_info.is_real_error error then Some error else None)
+      | (None, error) -> on_error error
 
+  let error e _ = Trampoline.return (None, e)
+
+  let rec recurse f = f (fun i -> recurse f i)
+
+  let and_then p q input =
+    Trampoline.bind (p input) (function
+        | (Some (result_p, input), error_p) ->
+            Trampoline.map (function
+              | (Some (result_q, input), error_q) ->
+                  (Some ((result_p, result_q), input), Error_info.merge error_p error_q)
+              | (None, error_q) ->
+                  (None, Error_info.merge error_p error_q)) (q input)
+        | (None, error_p) -> Trampoline.return (None, error_p))
+
+  let expect _ f input = (* name of the parser not used with simple parser combinators *)
+    match f input with
+      | Either.Left (output, input) ->
+          Trampoline.return (Some (output, input), Error_info.default_error)
+      | Either.Right error -> Trampoline.return (None, error)
+
+  let convert parsr converter input =
+    Trampoline.map (function
+        | (Some (output, input), error) -> (Some (converter output, input), error)
+        | (None, error) -> (None, error)) (parsr input)
+
+  let or_else p q input =
+    Trampoline.bind (p input) (function
+        | (Some (_, _), _) as result -> Trampoline.return result
+        | (None, error_p) ->
+            Trampoline.map (function
+              | (Some (result_q, input), error_q) ->
+                  (Some (result_q, input), Error_info.merge error_p error_q)
+              | (None, error_q) ->
+                  (None, Error_info.merge error_p error_q)) (q input))
+
+  let bind p f input =
+    Trampoline.bind (p input) (function
+      | (Some (output_p, input), error_p) ->
+          Trampoline.map (fun (result, error_q) ->
+                            (result, Error_info.merge error_p error_q))
+            (f output_p input) 
+      | (None, error_p) -> Trampoline.return (None, error_p))
 end
