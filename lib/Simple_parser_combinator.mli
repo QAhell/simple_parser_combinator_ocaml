@@ -64,7 +64,7 @@ sig
     ('a -> ('input, 'b) t) ->
     ('input, 'b) t
 
-  (*val repeat_and_fold_left :
+  val repeat_and_fold_left :
     ('input, 'a) t ->
     'b ->
     ('b -> 'a -> 'b) ->
@@ -73,6 +73,12 @@ sig
   val repeated :
     ('input, 'output) t ->
     ('input, 'output list) t
+
+  val once_or_more_and_fold_left :
+    ('input, 'a) t ->
+    'b ->
+    ('b -> 'a -> 'b) ->
+    ('input, 'b) t
 
   val once_or_more :
     ('input, 'output) t ->
@@ -97,6 +103,7 @@ sig
 
   module Code_point_parsers :
     functor (Input : Utf8_stream.Code_point_input) ->
+    functor (_ : sig val make_error : string -> Input.t -> Error_info.t end) ->
       sig
         val expect_several :
           string ->
@@ -106,11 +113,11 @@ sig
 
         val expect_code_point : int -> (Input.t, int) t
 
-        val expect_code_points : int list -> (Input.t, int) t
+        val expect_code_points : int list -> (Input.t, int list) t
 
         val expect_not_code_point : int list -> (Input.t, int) t
 
-        val expect_sring : string -> (Input.t, string) t
+        val expect_string : string -> (Input.t, string) t
 
         val expect_identifier : (Input.t, string) t
 
@@ -119,7 +126,7 @@ sig
         val expect_spaces : (Input.t, string) t
 
         val optional_spaces_before : (Input.t, 'a) t -> (Input.t, 'a) t
-      end *)
+      end 
 
 end
 

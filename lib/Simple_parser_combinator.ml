@@ -51,7 +51,7 @@ sig
     ('a -> ('input, 'b) t) ->
     ('input, 'b) t
 
-  (*val repeat_and_fold_left :
+  val repeat_and_fold_left :
     ('input, 'a) t ->
     'b ->
     ('b -> 'a -> 'b) ->
@@ -60,6 +60,12 @@ sig
   val repeated :
     ('input, 'output) t ->
     ('input, 'output list) t
+
+  val once_or_more_and_fold_left :
+    ('input, 'a) t ->
+    'b ->
+    ('b -> 'a -> 'b) ->
+    ('input, 'b) t
 
   val once_or_more :
     ('input, 'output) t ->
@@ -84,6 +90,7 @@ sig
 
   module Code_point_parsers :
     functor (Input : Utf8_stream.Code_point_input) ->
+    functor (_ : sig val make_error : string -> Input.t -> Error_info.t end) ->
       sig
         val expect_several :
           string ->
@@ -93,11 +100,11 @@ sig
 
         val expect_code_point : int -> (Input.t, int) t
 
-        val expect_code_points : int list -> (Input.t, int) t
+        val expect_code_points : int list -> (Input.t, int list) t
 
         val expect_not_code_point : int list -> (Input.t, int) t
 
-        val expect_sring : string -> (Input.t, string) t
+        val expect_string : string -> (Input.t, string) t
 
         val expect_identifier : (Input.t, string) t
 
@@ -107,7 +114,6 @@ sig
 
         val optional_spaces_before : (Input.t, 'a) t -> (Input.t, 'a) t
       end
-      *)
 
 end
 
@@ -178,4 +184,141 @@ struct
                             (result, Error_info.merge error_p error_q))
             (f output_p input) 
       | (None, error_p) -> Trampoline.return (None, error_p))
+
+  let rec repeat_and_fold_left p acc f input =
+    Trampoline.bind (p input) (function
+      | (Some (output, input), _) ->
+          repeat_and_fold_left p (f acc output) f input
+      | (None, error) ->
+          Trampoline.return (Some (acc, input), error))
+
+  let repeated p = convert (repeat_and_fold_left p [] (fun xs x -> x :: xs)) List.rev
+
+  let once_or_more_and_fold_left p acc f input =
+    bind p (fun result -> repeat_and_fold_left p (f acc result) f) input
+
+  let once_or_more p =
+    convert (once_or_more_and_fold_left p [] (fun xs x -> x :: xs)) List.rev
+
+  let optional p input =
+    Trampoline.map (function
+      | (Some (output, input), error) -> (Some (Some output, input), error)
+      | (None, error) -> (Some (None, input), error)) (p input)
+
+  let name _ p = p
+
+  let first p = convert p (fun (x, _) -> x)
+
+  let second p = convert p (fun (_, y) -> y)
+
+  module Code_point_parsers =
+    functor (Input : Utf8_stream.Code_point_input) ->
+    functor (Make_error : sig val make_error : string -> Input.t -> Error_info.t end) ->
+      struct
+        let expect_several name is_first_code_point is_later_code_point input =
+          match Input.get input with
+            | Some (first_code_point, input) when is_first_code_point first_code_point ->
+                let rec parse_later_chars input acc =
+                  match Input.get input with
+                    | Some (later_code_point, input) when is_later_code_point later_code_point ->
+                        parse_later_chars input (Utf8_stream.Encoded_string_output.put acc later_code_point)
+                    | _ ->
+                        Trampoline.return (Some (Utf8_stream.Encoded_string_output.to_string acc, input), Error_info.default_error) in
+              parse_later_chars input (Utf8_stream.Encoded_string_output.put (Utf8_stream.Encoded_string_output.empty ()) first_code_point)
+          | Some (code_point, input) -> Trampoline.return (None, Make_error.make_error (
+                  "Expected identifier <" ^ name ^ ">, found code point " ^
+                  string_of_int code_point) input)
+          | None -> Trampoline.return (None, Make_error.make_error (
+                  "Expected identifier <" ^ name ^ ">, found end of input") input)
+
+        let expect_code_point code_point input =
+          match Input.get input with
+            | Some (same_code_point, input) when code_point = same_code_point ->
+                Trampoline.return (Some (code_point, input), Error_info.default_error)
+            | Some (other_code_point, input) ->
+                Trampoline.return (None, Make_error.make_error (
+                  "Expected code point " ^ string_of_int code_point ^
+                  ", found code point " ^ string_of_int other_code_point) input)
+            | None ->
+                Trampoline.return (None, Make_error.make_error (
+                  "Expected code point " ^ string_of_int code_point ^
+                  ", found end of input") input)
+
+        let expect_code_points code_points input =
+          let rec expect_rec code_points acc input =
+            match code_points, Input.get input with
+              | (code_point :: code_points, Some (same_code_point, input))
+                  when code_point = same_code_point ->
+                  expect_rec code_points (code_point :: acc) input
+              | (code_point :: _, Some (other_code_point, input)) ->
+                  Trampoline.return (None, Make_error.make_error (
+                    "Expected code point " ^ string_of_int code_point ^
+                    ", found code point " ^ string_of_int other_code_point) input)
+              | (code_point :: _, None) ->
+                  Trampoline.return (None, Make_error.make_error (
+                    "Expected code point " ^ string_of_int code_point ^
+                    ", found end of input") input)
+              | [], _ ->
+                  Trampoline.return (Some (List.rev acc, input), Error_info.default_error) in
+          expect_rec code_points [] input
+
+        let expect_not_code_point code_points input =
+          let rec string_of_code_points = function
+            | code_point :: code_points ->
+                string_of_int code_point ^ ", " ^ string_of_code_points code_points
+            | [] -> "" in
+          match Input.get input with
+            | Some (other_code_point, input)
+                when not (List.mem other_code_point code_points) ->
+                Trampoline.return (Some (other_code_point, input), Error_info.default_error)
+            | Some (code_point, input) ->
+                Trampoline.return (None,
+                    Make_error.make_error ("Expected code point not in [" ^
+                      string_of_code_points code_points ^ "], found code point " ^
+                      string_of_int code_point) input)
+            | None ->
+                Trampoline.return (None,
+                    Make_error.make_error ("Expected code point not in [" ^
+                      string_of_code_points code_points ^ "], found end of input") input)
+
+        let expect_string text =
+          convert (expect_code_points (Utf8_stream.code_points_of_string text))
+            Utf8_stream.string_of_code_points
+
+        let expect_identifier =
+          let is_first_character c =
+            int_of_char 'a' <= c && c <= int_of_char 'z' ||
+            int_of_char '0' <= c && c <= int_of_char '9' in
+          let is_later_character c =
+            is_first_character c ||
+            int_of_char 'A' <= c && c <= int_of_char 'Z' in
+          expect_several "identifier" is_first_character is_later_character
+
+        let expect_digit =
+          expect "digit" (fun input ->
+            match Input.get input with
+              | Some (digit, input)
+                    when int_of_char '0' <= digit && digit <= int_of_char '9' ->
+                  Either.Left (digit - int_of_char '0', input)
+              | Some (other, input) ->
+                  Either.Right (Make_error.make_error (
+                      "Expected digit, found code point " ^ string_of_int other) input)
+              | None ->
+                  Either.Right (Make_error.make_error (
+                      "Expected digit, found end of input") input))
+
+        let expect_natural_number =
+          once_or_more_and_fold_left expect_digit
+            "" (fun acc digit -> acc ^ string_of_int digit)
+
+        let expect_spaces =
+          let is_space c =
+            int_of_char ' ' = c || int_of_char '\n' = c ||
+            int_of_char '\r' = c || int_of_char '\t' = c in
+          expect_several "spaces" is_space is_space
+
+        let optional_spaces_before p =
+          second (and_then (optional expect_spaces) p)
+      end
+
 end
